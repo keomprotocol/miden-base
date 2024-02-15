@@ -33,3 +33,14 @@ pub fn build_p2id_recipient(target: AccountId, serial_num: Word) -> Result<Diges
         Hasher::hash_elements(&[target.into(), ZERO, ZERO, ZERO]),
     ]))
 }
+
+/// Creates the partial_RECIPIENT for generating note clones
+/// miden-lib/src/notes/utils.rs
+pub fn build_partial_recipient(note_script: NoteScript, serial_num: Word) -> Result<Digest, NoteError> {
+
+    let script_hash = note_script.hash();
+
+    let serial_num_hash = Hasher::merge(&[serial_num.into(), Digest::default()]);
+
+    Ok( Hasher::merge(&[serial_num_hash, script_hash]) )
+}

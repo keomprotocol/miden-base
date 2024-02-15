@@ -1,0 +1,336 @@
+use.miden::note
+use.miden::contracts::wallets::basic->wallet
+
+# miden-lib/asm/note_scripts/LIMIT_SWAP.masm 
+#
+# Limit Swap script: adds an amount X of asset A from the note into consumers account and
+# creates two notes:
+# Note 1 : a note consumable by note issuer containing requested 
+# ASSET B in amount Y satisfying X * asset_B_requested_amount = Y * # asset_A_amount_offered.
+#
+# Note 2 : a note which is the clone of the note being consumed, 
+# where the new_asset_A_amount_offered has been reduced by the 
+# amount X just consumed. 
+# new_asset_A_amount_offered = asset_A_amount_offered - X
+#
+# equires that the account exposes: 
+#
+# Inputs:  [SCRIPT_ROOT, amount_to_consume, amount_to_send]
+# Outputs: []
+# Memory Used: [NEW_NOTE_OFFER_ASSET, P2ID_RECIPIENT, (NEW)NOTE_REQUEST_ASSET, TAG, PARTIAL_CLONE_RECIPIENT, amount_to_consume, amount_to_send, amount_offered, amount_desired]   
+#
+# Note inputs are assumed to be as follows:
+# - P2ID_RECIPIENT
+# - ASSET
+# - TAG = [tag, 0, 0, 0]
+# - PARTIAL_CLONE_RECIPIENT
+#
+# FAILS if:
+# - Account does not expose miden::contracts::wallets::basic::receive_asset procedure
+# - Account does not expose miden::contracts::wallets::basic::send_asset procedure
+# - Account vault does not contain the requested asset
+# - Adding a fungible asset would result in amount overflow, i.e., the total amount would be
+#   greater than 2^63
+
+proc.process_offer_asset
+    #! Loads NOTE_OFFER_ASSET to address 0
+    #! using exec.note::get_assets.
+    #! Saves the note's amount_offered to address 23
+    #! Subtracts amount_to_consume from amount_offered
+    #! to build NEW_NOTE_OFFER_ASSET.
+    #! Finally, NEW_NOTE_OFFER_ASSET is stored in 
+    #! address 0, overwriting NOTE_OFFER_ASSET
+    #! which isn't needed anymore.
+    #! Procedure leaves NOTE_OFFER_ASSET on the stack
+    #! for subsequent processing
+    #!
+    #! Inputs: [...]
+    #! Outputs: [NOTE_OFFER_ASSET]
+    #!
+    #! FAILS if:
+    #! - amount_to_send > amount_desired
+    #!
+    # store asset into memory at address 0
+    #
+    push.0 exec.note::get_assets assert
+    # => [ptr]
+
+    # load the offered asset in the note, duplicate word
+    # and duplicate amount field twice: 
+    # amount_offered = NOTE_OFFER_ASSET[3]
+    #
+    mem_loadw dupw dup.3 dup
+    # => [amount_offered, amount_offered, NOTE_OFFER_ASSET, NOTE_OFFER_ASSET]
+
+    # Store amount_offered in memory at address 23
+    #
+    mem_store.23
+    # => [amount_offered, NOTE_OFFER_ASSET, NOTE_OFFER_ASSET]
+
+    # Load amount_to_consume from address 21
+    #
+    mem_load.21 
+    # => [amount_to_consume, amount_offered, NOTE_OFFER_ASSET, NOTE_OFFER_ASSET]
+
+    # Duplicate amounts and assert that 
+    # amount_to_consume is less 
+    # than or equal to amount_offered
+    #
+    dup.1 dup.1 gte assert 
+    # => [amount_to_consume, amount_offered, NOTE_OFFER_ASSET, NOTE_OFFER_ASSET]
+
+    # Subtract amounts to compute the clone note's 
+    # offer asset amount and manipulate stack to 
+    # build NEW_NOTE_OFFER_ASSET = [NOTE_OFFER_ASSET[0], NOTE_OFFER_ASSET[1], NOTE_OFFER_ASSET[2], amount_offered-amount_to_consume]
+    #
+    sub movdn.3
+    # => [NEW_NOTE_OFFER_ASSET, amount_offered, NOTE_OFFER_ASSET]
+
+    # Store NEW_NOTE_OFFER_ASSET into memory at address 0
+    # and leave only NOTE_OFFER_ASSET on the stack
+    #
+    mem_storew.0 dropw drop 
+    # => [NOTE_OFFER_ASSET]
+end
+
+proc.process_request_asset
+    #! Loads NOTE_REQUEST_ASSET from address 2.
+    #! Saves the note's amount_desired to address 24
+    #! Subtracts amount_to_send from amount_desired
+    #! to build NEW_NOTE_REQUEST_ASSET.
+    #! Finally, NEW_NOTE_REQUEST_ASSET is stored in 
+    #! address 2, overwriting NOTE_REQUEST_ASSET
+    #! which isn't needed anymore.
+    #!
+    #! Inputs: [...]
+    #! Outputs: [...]
+    #!
+    #! FAILS if:
+    #! - amount_to_send > amount_desired
+    #!
+
+    # Load NOTE_REQUEST_ASSET word from address 2
+    # and duplicate amount_desired = NOTE_REQUEST_ASSET[3]
+    # 
+    padw mem_loadw.2 dup.3 
+    # => [amount_desired, NOTE_REQUEST_ASSET]
+
+    # Duplicate amount_desired and store at address 24
+    dup mem_store.24
+    # => [amount_desired, NOTE_REQUEST_ASSET]
+
+    # Load amount_to_send from address 22
+    #
+    mem_load.22
+    # => [amount_to_send, amount_desired, NOTE_REQUEST_ASSET]
+
+    # Duplicate amounts and assert that 
+    # amount_to_send is less 
+    # than or equal to amount_desired
+    #
+    dup.1 dup.1 gte assert 
+    # => [amount_to_send, amount_desired, NOTE_REQUEST_ASSET]
+
+    # Subtract amounts to compute the clone note's 
+    # request asset amount and move down 3 slots
+    # to build 
+    # NEW_NOTE_REQUEST_ASSET = [NOTE_REQUEST_ASSET[0], NOTE_REQUEST_ASSET[1], NOTE_REQUEST_ASSET[2], amount_desired-amount_to_send]
+    #
+    sub movdn.3
+    # => [NEW_NOTE_REQUEST_ASSET, amount_desired]
+
+    # Store NEW_NOTE_REQUEST_ASSET by overwriting
+    # NOTE_REQUEST_ASSET at address 2. All memory is now utilized
+    # Clear the stack.
+    #
+    mem_storew.2 dropw drop
+    # => []
+end
+
+proc.create_p2id_note
+    #! Creates P2ID_RECIPIENT from address 1,
+    #! TAG from address 2,
+    #! NOTE_REQUEST_ASSET from address 3,
+    #! and amount_to_send from address 22.
+    #! Builds and creates p2id
+    #! note using amount_to_send, P2ID_RECIPIENT,
+    #! and NEW_NOTE_REQUEST_ASSET to assemble
+    #! P2ID_ASSET = [NEW_NOTE_REQUEST_ASSET[0], NEW_NOTE_REQUEST_ASSET[0], NEW_NOTE_REQUEST_ASSET[0], amount_to_send].
+    #! The final note inputs are then executed using call.wallet::send_asset
+    #!
+    #! Inputs: [...]
+    #! Outputs: [...]
+    #!
+    #! FAILS if:
+    #! - Account does not expose miden::contracts::wallets::basic::send_asset procedure
+    #! - Account vault does not contain the requested asset
+    #! - Adding a fungible asset would result in amount overflow, i.e., the total amount would be
+    #!   greater than 2^63
+    #!
+
+    # Load P2ID_RECIPIENT from address 1
+    padw mem_loadw.1
+    # => [P2ID_RECIPIENT]
+
+    # Load TAG and extract tag
+    padw mem_loadw.2 drop drop drop
+    # => [tag, P2ID_RECIPIENT]
+
+    # Load NOTE_REQUEST_ASSET from address 3
+    padw mem_loadw.3
+    # => [NOTE_REQUEST_ASSET, tag, P2ID_RECIPIENT]
+
+    # Load amount_to_send from address 22
+    mem_load.22
+    # => [amount_to_send, NOTE_REQUEST_ASSET, tag, P2ID_RECIPIENT]
+
+    # Swap with NOTE_REQUEST_ASSET[3] and drop top of stack
+    # This builds P2ID_ASSET = [NOTE_REQUEST_ASSET[0], NOTE_REQUEST_ASSET[1], NOTE_REQUEST_ASSET[2], amount_to_send]
+    swap.3 drop
+    # => [P2ID_ASSET, tag, P2ID_RECIPIENT]
+
+    # create a new p2id note using inputs
+    call.wallet::send_asset dropw dropw
+    # => []
+end
+
+proc.limit_order_logic
+    #! Asserts limit order logic by verifying that p1=p2 where:
+    #! p1 = amount_to_consume * amount_desired
+    #! p2 = amount_offered    * amount_to_send
+    #!
+    #! Inputs: [...]
+    #! Outputs: [...]
+    #!
+    #! FAILS if:
+    #! - p1 does not equal p2
+    #! - Adding a fungible asset would result in amount overflow, i.e., the total amount would be
+    #!   greater than 2^63
+    #!
+
+    # Load all relevant amounts from memory stack addresses 
+    # amount_to_send    <- address 22 
+    # amount_offered    <- address 23
+    # amount_desired    <- address 24
+    # amount_to_consume <- address 21
+    mem_load.22 mem_load.23 mem_load.24 mem_load.21
+    # => [amount_to_consume, amount_desired, amount_offered, amount_to_send]
+
+    # Multiply p1=amount_to_consume*amount_desired, p2=amount_offered*amount_to_send, and assert equality
+    mul swap swap.1 mul eq assert
+end
+
+proc.build_new_note_recipient
+    #! Builds new note recipient by loading all new note inputs 
+    #! constructing their INPUT_HASH and hashing it with
+    #! PARTIAL_CLONE_RECIPIENT 
+    #!
+    #! Inputs: [...]
+    #! Outputs: [NEW_NOTE_RECIPIENT]
+    #!
+    #! FAILS if:
+    #!
+
+    # Load all 4 input words in order
+    # starting from address 1
+    padw mem_loadw.1 padw mem_loadw.2  padw mem_loadw.3 padw mem_loadw.4
+    # => [PARTIAL_CLONE_RECIPIENT, TAG, NEW_NOTE_REQUEST_ASSET, P2ID_RECIPIENT]
+
+    # Compute INPUT_HASH
+    hmerge hmerge hmerge 
+    # => [INPUT_HASH]
+
+    # Load PARTIAL_CLONE_RECIPIENT again
+    # and swap with INPUT_HASH
+    padw mem_loadw.4 swapw
+    # => [INPUT_HASH, PARTIAL_CLONE_RECIPIENT]
+
+    # Compute NEW_NOTE_RECIPIENT = hash(PARTIAL_CLONE_RECIPIENT, INPUT_HASH)
+    hmerge 
+    # => [NEW_NOTE_RECIPIENT]
+end
+
+proc.create_clone_limit_order_note
+    #! Creates clone of note being consumed with adjusted
+    #! offered and desired amounts.
+    #!
+    #! Inputs: [NEW_NOTE_RECIPIENT]
+    #! Outputs: [...]
+    #!
+    #! FAILS if:
+    #!
+    
+    # Load TAG from address 2 
+    # and extract tag = TAG[3]
+    #
+    padw mem_loadw.2 drop drop drop
+    # => [tag, NEW_NOTE_RECIPIENT]
+
+    # Load NEW_NOTE_OFFER_ASSET from 
+    # address 0
+    # 
+    padw mem_loadw.0 
+    # => [NEW_NOTE_OFFER_ASSET, tag, NEW_NOTE_RECIPIENT]
+
+    # Execute note creation 
+    # 
+    exec.tx::create_note dropw dropw
+    # => []
+end
+
+
+begin
+    # drop the transaction script root
+    # and save amount_to_consume/amount_to_send
+    # into memory at addresses 21/22 
+    # 
+    dropw mem_store.21 mem_store.22
+    # => []
+
+    # Build NEW_NOTE_OFFER_ASSET in memory
+    # address 0 as well as storing
+    # amount_offered into address 23 
+    # 
+    exec.process_offer_asset
+    # => [NOTE_OFFER_ASSET] 
+
+    # Add NOTE_OFFER_ASSET to consumer account
+    #
+    call.wallet::receive_asset dropw
+    # => [] 
+
+    # store note inputs into memory starting at address 1
+    #
+    push.1 exec.note::get_inputs drop
+    # => []
+
+    # Build NEW_NOTE_REQUEST_ASSET in memory
+    # address 2 as well as storing
+    # amount_desired into address 24 
+    # 
+    exec.process_request_asset
+    # => []
+
+    # Builds and creates p2id
+    # note using amount_to_send, P2ID_RECIPIENT,
+    # and NEW_NOTE_REQUEST_ASSET to assemble
+    # P2ID_ASSET = [NEW_NOTE_REQUEST_ASSET[0], NEW_NOTE_REQUEST_ASSET[0], NEW_NOTE_REQUEST_ASSET[0], amount_to_send]
+    # 
+    exec.create_p2id_note
+    # => []
+
+    # Assert that note owner's spend conditions are respected.
+    # 
+    exec.limit_order_logic
+    # => []
+
+    # Build NEW_NOTE_RECIPIENT
+    #
+    exec.build_new_note_recipient
+    # => [NEW_NOTE_RECIPIENT]
+
+    # Build and create clone of limit order note
+    # currently being consumed 
+    #
+    exec.create_clone_limit_order_note
+end

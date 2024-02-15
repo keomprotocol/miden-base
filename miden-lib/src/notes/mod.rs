@@ -105,3 +105,45 @@ pub fn create_swap_note<R: FeltRng>(
 
     Ok((note, payback_serial_num))
 }
+
+pub fn create_limit_swap_note<R: FeltRng>(
+    sender: AccountId,
+    offered_asset: Asset,
+    requested_asset: Asset,
+    mut rng: R,
+) -> Result<(Note, Word), NoteError> {
+    let bytes                        = include_bytes!(concat!(env!("OUT_DIR"), "/assets/note_scripts/LIMIT_SWAP.masb"));
+    let note_script                  = build_note_script(bytes)?;
+
+    let payback_serial_num           = rng.draw_word();
+    let note_serial_num              = rng.draw_word();
+
+    let p2id_RECIPIENT               = utils::build_p2id_recipient(sender, payback_serial_num)?;
+    let partial_RECIPIENT            = utils::build_partial_recipient(note_script, note_serial_num)?;
+    let requested_asset_word: Word   = requested_asset.into();
+
+    let inputs = [
+        p2id_RECIPIENT[0],
+        p2id_RECIPIENT[1],
+        p2id_RECIPIENT[2],
+        p2id_RECIPIENT[3],
+        requested_asset_word[0],
+        requested_asset_word[1],
+        requested_asset_word[2],
+        requested_asset_word[3], 
+        sender.into(),
+        ZERO,
+        ZERO,
+        ZERO,
+        partial_RECIPIENT[0]
+        partial_RECIPIENT[1]
+        partial_RECIPIENT[2]
+        partial_RECIPIENT[3]
+    ];
+
+    let tag: Felt = Felt::new(0);
+
+    let note = Note::new(note_script.clone(), &inputs, &[offered_asset], note_serial_num, sender, tag)?;
+
+    Ok((note, payback_serial_num, note_serial_num))
+}
